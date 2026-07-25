@@ -29,14 +29,15 @@
 static char g_from[MAX_FROM_LEN + 1];
 static char g_to[MAX_TO_LEN + 1];
 static char g_subject[MAX_SUBJECT_LEN + 1];
-static char g_body_hash[2 * BODY_HASH_LEN + 1];
+static char g_body[MAX_BODY_LEN + 1];
+static char g_request[2 * CHALLENGE_LEN + 1];
 
-// From / To / Subject / Body hash
-static nbgl_contentTagValue_t pairs[4];
+// From / To / Subject / Message / Request ID
+static nbgl_contentTagValue_t pairs[5];
 static nbgl_contentTagValueList_t pairList;
 
 // Copy a bounded, non-terminated field into a null-terminated display buffer.
-static void copy_field(char *dst, size_t dst_sz, const uint8_t *src, uint8_t len) {
+static void copy_field(char *dst, size_t dst_sz, const uint8_t *src, size_t len) {
     explicit_bzero(dst, dst_sz);
     size_t n = (len < dst_sz - 1) ? len : dst_sz - 1;
     memmove(dst, src, n);
@@ -65,7 +66,10 @@ int ui_display_transaction(void) {
     copy_field(g_from, sizeof(g_from), email->from, email->from_len);
     copy_field(g_to, sizeof(g_to), email->to, email->to_len);
     copy_field(g_subject, sizeof(g_subject), email->subject, email->subject_len);
-    if (format_hex(email->body_hash, BODY_HASH_LEN, g_body_hash, sizeof(g_body_hash)) == -1) {
+    // The body is displayed IN FULL — the parser already refused anything that
+    // would not fit, so nothing signed is ever hidden from the human.
+    copy_field(g_body, sizeof(g_body), email->body, email->body_len);
+    if (format_hex(email->challenge, CHALLENGE_LEN, g_request, sizeof(g_request)) == -1) {
         return io_send_sw(SWO_INCORRECT_DATA);
     }
 
@@ -75,11 +79,13 @@ int ui_display_transaction(void) {
     pairs[1].value = g_to;
     pairs[2].item = "Subject";
     pairs[2].value = g_subject;
-    pairs[3].item = "Body (SHA-256)";
-    pairs[3].value = g_body_hash;
+    pairs[3].item = "Message";
+    pairs[3].value = g_body;
+    pairs[4].item = "Request ID";
+    pairs[4].value = g_request;
 
-    pairList.nbMaxLinesForValue = 0;
-    pairList.nbPairs = 4;
+    pairList.nbMaxLinesForValue = 0;  // no truncation: show the whole value
+    pairList.nbPairs = 5;
     pairList.pairs = pairs;
     pairList.wrapping = true;
 

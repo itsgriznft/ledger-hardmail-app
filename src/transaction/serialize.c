@@ -28,10 +28,14 @@ int transaction_serialize(const transaction_t *tx, uint8_t *out, size_t out_len)
     LEDGER_ASSERT(tx != NULL, "NULL tx");
     LEDGER_ASSERT(out != NULL, "NULL out");
 
-    size_t need = 1 + tx->from_len + 1 + tx->to_len + 1 + tx->subject_len + BODY_HASH_LEN;
+    size_t need = CHALLENGE_LEN + 1 + tx->from_len + 1 + tx->to_len + 1 + tx->subject_len + 2 +
+                  tx->body_len;
     if (need > out_len) {
         return -1;
     }
+
+    memmove(out + offset, tx->challenge, CHALLENGE_LEN);
+    offset += CHALLENGE_LEN;
 
     out[offset++] = tx->from_len;
     memmove(out + offset, tx->from, tx->from_len);
@@ -45,8 +49,10 @@ int transaction_serialize(const transaction_t *tx, uint8_t *out, size_t out_len)
     memmove(out + offset, tx->subject, tx->subject_len);
     offset += tx->subject_len;
 
-    memmove(out + offset, tx->body_hash, BODY_HASH_LEN);
-    offset += BODY_HASH_LEN;
+    out[offset++] = (uint8_t) (tx->body_len >> 8);
+    out[offset++] = (uint8_t) (tx->body_len & 0xff);
+    memmove(out + offset, tx->body, tx->body_len);
+    offset += tx->body_len;
 
     return (int) offset;
 }
