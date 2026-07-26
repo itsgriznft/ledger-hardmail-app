@@ -76,8 +76,12 @@ int apdu_dispatcher(const command_t *cmd) {
         case SIGN_TOKEN_TX:
             // Common handler for both SIGN_TX and SIGN_TOKEN_TX, the content is very similar
             PRINTF("APDU_DISPATCHER: %d\n", cmd->ins);
+            // P1 is only "0 = derivation path, anything else = payload". There
+            // is deliberately no ceiling on it: the message is streamed, so the
+            // number of chunks is unbounded. Ordering and completeness are
+            // enforced by the signing state machine (declared body length vs
+            // bytes actually received), which is stronger than a P1 limit.
             if ((cmd->p1 == P1_START && cmd->p2 != P2_MORE) ||  //
-                cmd->p1 > P1_MAX ||                             //
                 (cmd->p2 != P2_LAST && cmd->p2 != P2_MORE)) {
                 return io_send_sw(SWO_INCORRECT_P1_P2);
             }

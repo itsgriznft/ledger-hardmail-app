@@ -52,15 +52,44 @@ static void copy_field(char *dst, size_t dst_sz, const uint8_t *src, size_t len)
     dst[n] = '\0';
 }
 
-// The user swiped past a page (confirm) or rejected. On confirm we release the
-// APDU so the host may send the next slice; on rejection the whole review dies.
+// Where the streamed review currently is. Each NBGL page hands control back
+// here when the user swipes past it, and only then do we answer the APDU that
+// delivered that page's content — which is what stops the host from running
+// ahead of what the human has actually read.
+typedef enum {
+    UI_INTRO,      /// the "Review email" title page
+    UI_HEADER,     /// from / to / subject / attachment / request id
+    UI_BODY,       /// a slice of the message, more to come
+    UI_BODY_LAST   /// the final slice — next stop is the signing page
+} ui_step_e;
+
+static ui_step_e g_step;
+
+static void review_choice(bool confirm);
+
 static void page_choice(bool confirm) {
-    if (confirm) {
-        io_send_sw(SWO_SUCCESS);
-    } else {
+    if (!confirm) {
         G_context.state = STATE_NONE;
         validate_transaction(false);
         nbgl_useCaseReviewStatus(STATUS_TYPE_TRANSACTION_REJECTED, ui_menu_main);
+        return;
+    }
+    switch (g_step) {
+        case UI_INTRO:
+            // Title acknowledged — now show who this mail is from and to.
+            g_step = UI_HEADER;
+            nbgl_useCaseReviewStreamingContinue(&header_list, page_choice);
+            break;
+        case UI_HEADER:
+        case UI_BODY:
+            // Page read: release the APDU so the host may send the next slice.
+            io_send_sw(SWO_SUCCESS);
+            break;
+        case UI_BODY_LAST:
+            // The whole message has been seen; ask for the signature. The APDU
+            // is answered by review_choice, with the signature or a denial.
+            nbgl_useCaseReviewStreamingFinish("Sign to send\nthis email?", review_choice);
+            break;
     }
 }
 
@@ -136,7 +165,8 @@ int ui_stream_header(void) {
 
 // Show one slice of the message. `text` is the null-terminated slice held in
 // the context, so it stays valid while NBGL renders the page.
-int ui_stream_body_page(const char *text) {
+int ui_stream_body_page(const char *text, bool is_last) {
+    g_step = is_last ? UI_BODY_LAST : UI_BODY;
     body_pair[0].item = "Message";
     body_pair[0].value = text;
 

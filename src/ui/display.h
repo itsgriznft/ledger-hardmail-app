@@ -40,15 +40,10 @@ int ui_stream_header(void);
 /**
  * Show one slice of the message body as it arrives.
  *
- * @param[in] text Null-terminated slice, owned by the caller for the page's life.
+ * @param[in] text    Null-terminated slice, owned by the caller for the page's life.
+ * @param[in] is_last Whether this is the final slice (the signing page comes next).
  *
  * @return 0 if success, negative integer otherwise.
  */
-int ui_stream_body_page(const char *text);
+int ui_stream_body_page(const char *text, bool is_last);
 
-/**
- * The whole message has been displayed — ask the user to sign.
- *
- * @return 0 if success, negative integer otherwise.
- */
-int ui_stream_finish(void);

@@ -137,11 +137,11 @@ static int consume(buffer_t *cdata, bool more) {
         if (tx->body_seen != tx->transaction.body_len) {
             return fail(SWO_INCORRECT_DATA);  // short of what was declared
         }
-        // Last slice: show it, then ask for the signature.
-        ui_stream_body_page((const char *) tx->page);
-        return ui_stream_finish();
+        // Last slice: once the human has read it, the UI moves straight on to
+        // the signing page — which is what finally answers this APDU.
+        return ui_stream_body_page((const char *) tx->page, true);
     }
-    return ui_stream_body_page((const char *) tx->page);
+    return ui_stream_body_page((const char *) tx->page, false);
 }
 
 int handler_sign_tx(buffer_t *cdata, uint8_t chunk, bool more, bool is_token_tx) {
