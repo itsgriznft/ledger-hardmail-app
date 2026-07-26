@@ -30,25 +30,25 @@ typedef void (*action_validate_cb)(bool);
 int ui_display_address(void);
 
 /**
- * Display transaction information on the device and ask confirmation to sign.
+ * Start the streamed review: show who the email is from, to whom, about what,
+ * and the attachment descriptor if there is one.
  *
  * @return 0 if success, negative integer otherwise.
- *
  */
-int ui_display_transaction(void);
+int ui_stream_header(void);
 
 /**
- * Display blind-sign transaction information on the device and ask confirmation to sign.
+ * Show one slice of the message body as it arrives.
+ *
+ * @param[in] text Null-terminated slice, owned by the caller for the page's life.
  *
  * @return 0 if success, negative integer otherwise.
- *
  */
-int ui_display_blind_signed_transaction(void);
+int ui_stream_body_page(const char *text);
 
 /**
- * Display token transaction information on the device and ask confirmation to sign.
+ * The whole message has been displayed — ask the user to sign.
  *
  * @return 0 if success, negative integer otherwise.
- *
  */
-int ui_display_token_transaction(void);
+int ui_stream_finish(void);

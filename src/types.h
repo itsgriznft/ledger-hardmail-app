@@ -4,6 +4,7 @@
 #include <stdint.h>  // uint*_t
 
 #include "bip32.h"
+#include "cx.h"  // cx_sha256_t — the streaming digest
 
 #include "constants.h"
 #include "tx_types.h"
@@ -59,9 +60,20 @@ typedef struct {
  * Structure for transaction information context.
  */
 typedef struct {
-    uint8_t raw_tx[MAX_TRANSACTION_LEN];  /// raw transaction serialized
-    size_t raw_tx_len;                    /// length of raw transaction
-    transaction_t transaction;            /// structured transaction
+    // The message is STREAMED: only the header is buffered, while the body is
+    // hashed and displayed chunk by chunk as it arrives. That keeps RAM use
+    // constant no matter how long the email is — and, crucially, means every
+    // byte that is hashed has just been shown to the human.
+    uint8_t header[MAX_HEADER_LEN];  /// buffered header (small, bounded)
+    uint16_t header_len;             /// expected header length (from the frame)
+    uint16_t header_seen;            /// header bytes received so far
+    uint32_t body_seen;              /// body bytes received so far
+    bool frame_len_known;            /// have we read the 2-byte header length?
+    bool header_done;                /// header parsed and displayed?
+    cx_sha256_t hash_ctx;            /// running digest over the whole payload
+
+    uint8_t page[MAX_PAGE_LEN + 1];  /// current body slice, null-terminated for display
+    transaction_t transaction;       /// parsed header fields
 
     // Token related
     bool is_token_tx;         /// flag to indicate if this is a token transaction

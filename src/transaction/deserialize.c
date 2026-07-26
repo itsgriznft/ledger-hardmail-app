@@ -17,10 +17,7 @@
 #include "ledger_assert.h"
 #endif
 
-// Printable ASCII only (optionally allowing newlines, for the body). No control
-// characters means the value is safe to render as a C string and cannot smuggle
-// mail headers. Anything else fails closed.
-static bool text_ok(const uint8_t *p, size_t len, bool allow_newline) {
+bool text_is_displayable(const uint8_t *p, size_t len, bool allow_newline) {
     for (size_t i = 0; i < len; i++) {
         uint8_t c = p[i];
         if (allow_newline && c == '\n') {
@@ -46,13 +43,15 @@ static bool read_text_field(buffer_t *buf, uint8_t **field, uint8_t *field_len, 
     if (!buffer_seek_cur(buf, len)) {
         return false;
     }
-    if (!text_ok(*field, len, false)) {
+    if (!text_is_displayable(*field, len, false)) {
         return false;
     }
     *field_len = len;
     return true;
 }
 
+// Parse the buffered HEADER. The body is not here — it is streamed afterwards,
+// hashed and displayed slice by slice.
 parser_status_e transaction_deserialize(buffer_t *buf,
                                         transaction_t *tx,
                                         bool is_token_transaction) {
@@ -60,12 +59,12 @@ parser_status_e transaction_deserialize(buffer_t *buf,
     LEDGER_ASSERT(buf != NULL, "NULL buf");
     LEDGER_ASSERT(tx != NULL, "NULL tx");
 
-    if (buf->size > MAX_TX_LEN) {
+    if (buf->size > MAX_HEADER_LEN) {
         PRINTF("WRONG_LENGTH_ERROR\n");
         return WRONG_LENGTH_ERROR;
     }
 
-    // Relay-issued challenge — binds this approval to one short-lived request.
+    // Verifier-issued challenge — binds this approval to one short-lived request.
     tx->challenge = (uint8_t *) (buf->ptr + buf->offset);
     if (!buffer_seek_cur(buf, CHALLENGE_LEN)) {
         PRINTF("CHALLENGE_PARSING_ERROR\n");
@@ -84,29 +83,6 @@ parser_status_e transaction_deserialize(buffer_t *buf,
         PRINTF("SUBJECT_PARSING_ERROR\n");
         return SUBJECT_PARSING_ERROR;
     }
-
-    // Body: u16 length, rendered IN FULL on the device. A body too long to show
-    // is refused rather than truncated — the human must see everything that is
-    // signed, so we fail closed instead of silently hiding text.
-    uint16_t body_len;
-    if (!buffer_read_u16(buf, &body_len, BE)) {
-        PRINTF("BODY_PARSING_ERROR (len)\n");
-        return BODY_PARSING_ERROR;
-    }
-    if (body_len == 0 || body_len > MAX_BODY_LEN) {
-        PRINTF("BODY_PARSING_ERROR (bounds)\n");
-        return BODY_PARSING_ERROR;
-    }
-    tx->body = (uint8_t *) (buf->ptr + buf->offset);
-    if (!buffer_seek_cur(buf, body_len)) {
-        PRINTF("BODY_PARSING_ERROR (seek)\n");
-        return BODY_PARSING_ERROR;
-    }
-    if (!text_ok(tx->body, body_len, true)) {
-        PRINTF("FIELD_ENCODING_ERROR (body)\n");
-        return FIELD_ENCODING_ERROR;
-    }
-    tx->body_len = body_len;
 
     // Optional attachment: name + size + content hash. The device cannot render
     // a file, but it can show WHAT is being attached and pin its exact bytes.
@@ -142,6 +118,15 @@ parser_status_e transaction_deserialize(buffer_t *buf,
         tx->has_attachment = 1;
     }
 
-    // Exact-fit: no trailing bytes allowed.
+    if (!buffer_read_u32(buf, &tx->body_len, BE)) {
+        PRINTF("BODY_PARSING_ERROR (len)\n");
+        return BODY_PARSING_ERROR;
+    }
+    if (tx->body_len == 0 || tx->body_len > MAX_BODY_LEN) {
+        PRINTF("BODY_PARSING_ERROR (bounds)\n");
+        return BODY_PARSING_ERROR;
+    }
+
+    // Exact-fit: the header must end here, with the body still to come.
     return (buf->offset == buf->size) ? PARSING_OK : WRONG_LENGTH_ERROR;
 }

@@ -1,24 +1,31 @@
-"""Build the email payload the HardMail app parses, displays and signs.
+"""Build the streamed email payload the HardMail app parses, displays and signs.
 
-Mirrors app-hardmail/src/transaction/deserialize.c exactly:
+Mirrors app-hardmail/src/transaction/deserialize.c and sign_tx.c:
 
-    challenge(16) | from_len:u8|from | to_len:u8|to | subj_len:u8|subj
-                  | body_len:u16be|body
-                  | att_count:u8 [ name_len:u8|name | size:u32be | sha256(32) ]
+    header_len:u16be
+    header = challenge(16) | from_len:u8|from | to_len:u8|to | subj_len:u8|subj
+             | att_count:u8 [ name_len:u8|name | size:u32be | sha256(32) ]
+             | body_len:u32be
+    body   = body_len bytes
 
-Nothing is hashed away: the body travels as text so the device can render it.
+The header must end exactly on a chunk boundary; body slices follow in their own
+chunks, each of which the device displays before answering. Nothing is hashed
+away and nothing is buffered whole: the message can be any length.
+
+The signature covers sha256 of the entire frame, length prefix included.
 """
 
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Optional
+from typing import List, Optional
 
 CHALLENGE_LEN = 16
 MAX_FROM_LEN = 128
 MAX_TO_LEN = 128
 MAX_SUBJECT_LEN = 200
-MAX_BODY_LEN = 2048
 MAX_ATT_NAME_LEN = 64
+MAX_HEADER_LEN = 640
+MAX_PAGE_LEN = 255
 
 
 @dataclass(frozen=True)
@@ -59,23 +66,33 @@ class Email:
     body: str
     attachment: Optional[Attachment] = None
 
-    def serialize(self) -> bytes:
+    def header(self) -> bytes:
         assert len(self.challenge) == CHALLENGE_LEN
-        body = self.body.encode("ascii")
-        assert 1 <= len(body) <= MAX_BODY_LEN
+        body_len = len(self.body.encode("ascii"))
+        assert body_len > 0
         return (
             self.challenge
             + _text_field(self.sender, MAX_FROM_LEN)
             + _text_field(self.recipient, MAX_TO_LEN)
             + _text_field(self.subject, MAX_SUBJECT_LEN)
-            + len(body).to_bytes(2, byteorder="big")
-            + body
             + (self.attachment.serialize() if self.attachment else bytes([0]))
+            + body_len.to_bytes(4, byteorder="big")
         )
 
+    def chunks(self) -> List[bytes]:
+        """APDU-sized pieces: the header (ending on a boundary), then body slices."""
+        header = self.header()
+        assert len(header) <= MAX_HEADER_LEN
+        framed = len(header).to_bytes(2, byteorder="big") + header
+
+        pieces: List[bytes] = [framed[i : i + MAX_PAGE_LEN] for i in range(0, len(framed), MAX_PAGE_LEN)]
+        body = self.body.encode("ascii")
+        pieces += [body[i : i + MAX_PAGE_LEN] for i in range(0, len(body), MAX_PAGE_LEN)]
+        return pieces
+
     def signed_digest(self) -> bytes:
-        """What the device signs: sha256 over exactly the displayed payload."""
-        return sha256(self.serialize()).digest()
+        """What the device signs: sha256 over the whole streamed frame."""
+        return sha256(b"".join(self.chunks())).digest()
 
 
 def sample_email(challenge: bytes = b"\x11" * CHALLENGE_LEN, **overrides) -> Email:

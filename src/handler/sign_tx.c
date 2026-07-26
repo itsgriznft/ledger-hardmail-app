@@ -1,18 +1,8 @@
 /*****************************************************************************
- *   Ledger App Boilerplate.
- *   (c) 2020 Ledger SAS.
+ *   HardMail — email clear-signing app (based on Ledger App Boilerplate).
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
  *****************************************************************************/
 
 #include <stdint.h>   // uint*_t
@@ -23,7 +13,6 @@
 #include "os.h"
 #include "cx.h"
 #include "buffer.h"
-#include "swap.h"
 
 #include "sign_tx.h"
 #include "sw.h"
@@ -31,51 +20,21 @@
 #include "display.h"
 #include "tx_types.h"
 #include "deserialize.h"
-#include "handle_swap.h"
 #include "validate.h"
-#include "token_db.h"
-#include "swap_error_code_helpers.h"
-#include "dynamic_token_info.h"
 
-// This is a smart documentation inclusion. The full documentation is available at
-// https://ledgerhq.github.io/app-exchange/
-// --8<-- [start:ui_bypass]
-#ifdef HAVE_SWAP
-static int check_and_sign_swap_tx(transaction_ctx_t *tx_ctx) {
-    if (G_swap_response_ready) {
-        // Safety against trying to make the app sign multiple TX
-        // This code should never be triggered as the app is supposed to exit after
-        // sending the signed transaction
-        PRINTF("Safety against double signing triggered\n");
-        os_sched_exit(-1);
-    } else {
-        // We will quit the app after this transaction, whether it succeeds or fails
-        PRINTF("Swap response is ready, the app will quit after the next send\n");
-        // This boolean will make the io_send_sw family instant reply + return to exchange
-        G_swap_response_ready = true;
-    }
-    if (swap_check_validity(tx_ctx->transaction.value,
-                            tx_ctx->transaction.fee,
-                            tx_ctx->transaction.to,
-                            &tx_ctx->token_info)) {
-        PRINTF("Swap response validated, sign the transaction\n");
-        validate_transaction(true);
-    }
-    // Unreachable because swap_check_validity() returns an error to exchange app OR
-    // validate_transaction() returns a success to exchange
-    os_sched_exit(0);
-    return 0;
+// Streaming clear-signing.
+//
+// The device never holds the whole message. It buffers only the small header,
+// then takes the body chunk by chunk: each chunk is hashed, DISPLAYED, and its
+// APDU is answered only once the human has swiped past that page. The host
+// therefore cannot outrun the review, and every byte under the final signature
+// has been on screen.
+
+static int fail(uint16_t sw) {
+    G_context.state = STATE_NONE;
+    return io_send_sw(sw);
 }
-#endif  // HAVE_SWAP
-// --8<-- [end:ui_bypass]
 
-/**
- * Initialize transaction context for chunk 0
- *
- * @param[in] cdata Buffer containing BIP32 path
- * @param[in] req_type Request type (CONFIRM_TRANSACTION or CONFIRM_TOKEN_TRANSACTION)
- * @return SWO_SUCCESS on success, error code otherwise
- */
 static int init_transaction_context(buffer_t *cdata, uint8_t req_type) {
     explicit_bzero(&G_context, sizeof(G_context));
     G_context.req_type = req_type;
@@ -85,108 +44,113 @@ static int init_transaction_context(buffer_t *cdata, uint8_t req_type) {
         !buffer_read_bip32_path(cdata, G_context.bip32_path, (size_t) G_context.bip32_path_len)) {
         return io_send_sw(SWO_WRONG_DATA_LENGTH);
     }
-
+    if (cx_sha256_init_no_throw(&G_context.tx_info.hash_ctx) != CX_OK) {
+        return io_send_sw(SWO_INCORRECT_DATA);
+    }
     return io_send_sw(SWO_SUCCESS);
 }
 
-/**
- * Accumulate transaction data from APDU chunks
- * TODO: This should NOT be handled in each handler but at the dispatcher level
- *
- * @param[in] cdata Buffer containing transaction chunk
- * @param[in] req_type Expected request type for validation
- * @return SWO_SUCCESS on success, error code otherwise
- */
-static uint16_t accumulate_transaction_data(buffer_t *cdata, uint8_t req_type) {
-    if (G_context.req_type != req_type) {
-        return SWO_CONDITIONS_NOT_SATISFIED;
+// Parse and display the header once it has fully arrived.
+static int start_review(void) {
+    buffer_t buf = {.ptr = G_context.tx_info.header,
+                    .size = G_context.tx_info.header_len,
+                    .offset = 0};
+    if (transaction_deserialize(&buf, &G_context.tx_info.transaction, false) != PARSING_OK) {
+        return fail(SWO_INCORRECT_DATA);
     }
-    if (G_context.tx_info.raw_tx_len + cdata->size > sizeof(G_context.tx_info.raw_tx)) {
-        return SWO_WRONG_DATA_LENGTH;
-    }
-    if (!buffer_move(cdata, G_context.tx_info.raw_tx + G_context.tx_info.raw_tx_len, cdata->size)) {
-        return SWO_INCORRECT_DATA;
-    }
-    G_context.tx_info.raw_tx_len += cdata->size;
-    return SWO_SUCCESS;
+    G_context.tx_info.header_done = true;
+    G_context.state = STATE_PARSED;
+    // Deferred reply: the page callback answers this APDU once the human has
+    // seen the header.
+    return ui_stream_header();
 }
 
-static uint16_t process_transaction(bool is_token_tx) {
-    // last APDU for this transaction, let's parse, display and request a sign confirmation
-    buffer_t buf = {.ptr = G_context.tx_info.raw_tx,
-                    .size = G_context.tx_info.raw_tx_len,
-                    .offset = 0};
+// Consume one APDU worth of payload.
+static int consume(buffer_t *cdata, bool more) {
+    transaction_ctx_t *tx = &G_context.tx_info;
 
-    (void) is_token_tx;  // HardMail has no token flow
-    G_context.tx_info.is_token_tx = false;
-    parser_status_e status =
-        transaction_deserialize(&buf, &G_context.tx_info.transaction, false);
-    PRINTF("Parsing status: %d.\n", status);
-    if (status != PARSING_OK) {
-        return SWO_INCORRECT_DATA;
+    // Everything that arrives goes into the digest, framing included, so host
+    // and device agree byte for byte on what is being signed.
+    if (cx_hash_no_throw((cx_hash_t *) &tx->hash_ctx,
+                         0,
+                         cdata->ptr + cdata->offset,
+                         cdata->size - cdata->offset,
+                         NULL,
+                         0) != CX_OK) {
+        return fail(SWO_INCORRECT_DATA);
     }
 
-    G_context.state = STATE_PARSED;
-
-    // sha256 over the exact payload the device parsed and displays: this binds
-    // the signature to the shown From/To/Subject + body hash. The relay commits
-    // to the same bytes, so signature == approval of exactly this email.
-    if (cx_hash_sha256(G_context.tx_info.raw_tx,
-                       G_context.tx_info.raw_tx_len,
-                       G_context.tx_info.m_hash,
-                       sizeof(G_context.tx_info.m_hash)) != sizeof(G_context.tx_info.m_hash)) {
-        return SWO_INCORRECT_DATA;
+    // 1. The 2-byte frame telling us how long the header is.
+    if (!tx->frame_len_known) {
+        uint16_t len;
+        if (!buffer_read_u16(cdata, &len, BE)) {
+            return fail(SWO_WRONG_DATA_LENGTH);
+        }
+        if (len == 0 || len > MAX_HEADER_LEN) {
+            return fail(SWO_INCORRECT_DATA);
+        }
+        tx->header_len = len;
+        tx->frame_len_known = true;
     }
-    PRINTF("Hash: %.*H\n", sizeof(G_context.tx_info.m_hash), G_context.tx_info.m_hash);
-    return SWO_SUCCESS;
+
+    // 2. Buffer the header until it is complete, then review it.
+    if (!tx->header_done) {
+        size_t want = tx->header_len - tx->header_seen;
+        size_t avail = cdata->size - cdata->offset;
+        size_t take = (avail < want) ? avail : want;
+        memmove(tx->header + tx->header_seen, cdata->ptr + cdata->offset, take);
+        tx->header_seen += take;
+        cdata->offset += take;
+
+        if (tx->header_seen < tx->header_len) {
+            if (!more) {
+                return fail(SWO_WRONG_DATA_LENGTH);  // truncated header
+            }
+            return io_send_sw(SWO_SUCCESS);  // still collecting, nothing to show yet
+        }
+        if (cdata->offset != cdata->size) {
+            // Keep the framing simple and unambiguous: a chunk ends with the
+            // header, body slices start on the next one.
+            return fail(SWO_INCORRECT_DATA);
+        }
+        return start_review();
+    }
+
+    // 3. Body: hash it (done above), show it, and answer only after the human
+    //    has read this page.
+    size_t avail = cdata->size - cdata->offset;
+    if (avail == 0 || avail > MAX_PAGE_LEN) {
+        return fail(SWO_INCORRECT_DATA);
+    }
+    if (tx->body_seen + avail > tx->transaction.body_len) {
+        return fail(SWO_INCORRECT_DATA);  // more body than was declared
+    }
+    if (!text_is_displayable(cdata->ptr + cdata->offset, avail, true)) {
+        return fail(SWO_INCORRECT_DATA);
+    }
+
+    memmove(tx->page, cdata->ptr + cdata->offset, avail);
+    tx->page[avail] = '\0';
+    tx->body_seen += avail;
+
+    if (!more) {
+        if (tx->body_seen != tx->transaction.body_len) {
+            return fail(SWO_INCORRECT_DATA);  // short of what was declared
+        }
+        // Last slice: show it, then ask for the signature.
+        ui_stream_body_page((const char *) tx->page);
+        return ui_stream_finish();
+    }
+    return ui_stream_body_page((const char *) tx->page);
 }
 
 int handler_sign_tx(buffer_t *cdata, uint8_t chunk, bool more, bool is_token_tx) {
-    uint8_t req_type = is_token_tx ? CONFIRM_TOKEN_TRANSACTION : CONFIRM_TRANSACTION;
+    (void) is_token_tx;  // HardMail has no token flow
     if (chunk == 0) {
-        // first APDU, parse BIP32 path and return
-        return init_transaction_context(cdata, req_type);
-    } else {
-        // parse transaction
-        uint16_t err = accumulate_transaction_data(cdata, req_type);
-        if (err != SWO_SUCCESS) {
-            return io_send_sw(err);
-        }
-        if (more) {
-            // more APDUs with transaction part are expected.
-            // Send a SWO_SUCCESS to signal that we have received the chunk
-            return io_send_sw(SWO_SUCCESS);
-
-        } else {
-            // last APDU for this transaction, let's parse, display and request a sign confirmation
-            err = process_transaction(is_token_tx);
-            if (err != SWO_SUCCESS) {
-#ifdef HAVE_SWAP
-                if (G_called_from_swap) {
-                    PRINTF("Error during transaction processing in swap context: %u\n", err);
-                    // Suspicious error, Return to Exchange instead of simply return an error APDU
-                    send_swap_error_simple(SW_SWAP_FAIL, SWAP_EC_ERROR_GENERIC, SWAP_ERROR_CODE);
-                } else {
-                    return io_send_sw(err);
-                }
-#else
-                return io_send_sw(err);
-#endif
-            }
-
-#ifdef HAVE_SWAP
-            // If we are in swap context, do not redisplay the message data
-            // Instead, ensure they are identical with what was previously displayed
-            if (G_called_from_swap) {
-                check_and_sign_swap_tx(&G_context.tx_info);
-                // Unreachable
-                return 0;
-            }
-#endif  // HAVE_SWAP
-
-            // HardMail always clear-signs the email (never blind, no tokens).
-            return ui_display_transaction();
-        }
+        return init_transaction_context(cdata, CONFIRM_TRANSACTION);
     }
-    return 0;
+    if (G_context.req_type != CONFIRM_TRANSACTION) {
+        return fail(SWO_CONDITIONS_NOT_SATISFIED);
+    }
+    return consume(cdata, more);
 }

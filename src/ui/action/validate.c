@@ -36,6 +36,17 @@ void validate_pubkey(bool choice) {
 static int crypto_sign_message(void) {
     size_t sig_len = sizeof(G_context.tx_info.signature);
 
+    // Close the running digest: it covers every payload byte that was streamed
+    // in — and every one of those was displayed before we got here.
+    if (cx_hash_no_throw((cx_hash_t *) &G_context.tx_info.hash_ctx,
+                         CX_LAST,
+                         NULL,
+                         0,
+                         G_context.tx_info.m_hash,
+                         sizeof(G_context.tx_info.m_hash)) != CX_OK) {
+        return -1;
+    }
+
     // ed25519 (the Stellar curve): sign the sha256(email payload) directly, so
     // the 64-byte signature is verifiable by the relay against the enrolled
     // device public key with a standard ed25519 verify.
