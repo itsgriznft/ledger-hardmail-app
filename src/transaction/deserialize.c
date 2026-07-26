@@ -108,6 +108,40 @@ parser_status_e transaction_deserialize(buffer_t *buf,
     }
     tx->body_len = body_len;
 
+    // Optional attachment: name + size + content hash. The device cannot render
+    // a file, but it can show WHAT is being attached and pin its exact bytes.
+    tx->has_attachment = 0;
+    tx->att_name = NULL;
+    tx->att_name_len = 0;
+    tx->att_size = 0;
+    tx->att_hash = NULL;
+
+    uint8_t att_count;
+    if (!buffer_read_u8(buf, &att_count)) {
+        PRINTF("ATTACHMENT_PARSING_ERROR (count)\n");
+        return ATTACHMENT_PARSING_ERROR;
+    }
+    if (att_count > 1) {
+        PRINTF("ATTACHMENT_PARSING_ERROR (at most one)\n");
+        return ATTACHMENT_PARSING_ERROR;
+    }
+    if (att_count == 1) {
+        if (!read_text_field(buf, &tx->att_name, &tx->att_name_len, MAX_ATT_NAME_LEN)) {
+            PRINTF("ATTACHMENT_PARSING_ERROR (name)\n");
+            return ATTACHMENT_PARSING_ERROR;
+        }
+        if (!buffer_read_u32(buf, &tx->att_size, BE)) {
+            PRINTF("ATTACHMENT_PARSING_ERROR (size)\n");
+            return ATTACHMENT_PARSING_ERROR;
+        }
+        tx->att_hash = (uint8_t *) (buf->ptr + buf->offset);
+        if (!buffer_seek_cur(buf, ATT_HASH_LEN)) {
+            PRINTF("ATTACHMENT_PARSING_ERROR (hash)\n");
+            return ATTACHMENT_PARSING_ERROR;
+        }
+        tx->has_attachment = 1;
+    }
+
     // Exact-fit: no trailing bytes allowed.
     return (buf->offset == buf->size) ? PARSING_OK : WRONG_LENGTH_ERROR;
 }

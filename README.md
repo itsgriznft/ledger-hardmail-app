@@ -22,12 +22,19 @@ Companion host software (agent + verifying relay):
 2 of 4   From        HardMail Agent <agent@hardmail.local>
          To          boss@example.com
          Subject     Q3 report is ready for review
-3 of 4   Message     Hi,
+3 of 5   Message     Hi,
                      The Q3 report is finalized. Approved on hardware.
                      -- HardMail
-         Request ID  2B3B2598B74C3885E85762D06B48CDE8
-4 of 4   Sign to send this email?      [ Hold to sign ]
+         Attachment  q3-summary.txt (42 bytes)
+4 of 5   Attachment SHA-256  FF5FB4EC753CE6465AA5CAE2060D16A8…
+         Request ID          5289F578C2617F4B4B2FA623CD587B0B
+5 of 5   Sign to send this email?      [ Hold to sign ]
 ```
+
+An attachment cannot be *read* on a device screen — no hardware wallet renders a
+PDF. What the device does is **bind** it: the human decides on the file's name
+and size, and the signature covers its SHA-256, so the exact bytes are pinned
+and cannot be swapped afterwards.
 
 The **Request ID** is a single-use challenge issued by the verifier moments
 earlier. Because it is part of the signed bytes, an approval is only valid for
@@ -49,13 +56,15 @@ later.
 payload, 255 bytes each, `P2=0x80` on every chunk but the last (`P2=0x00`):
 
 ```
-challenge(16) | from_len:u8|from | to_len:u8|to | subj_len:u8|subj | body_len:u16be|body
+challenge(16) | from_len:u8|from | to_len:u8|to | subj_len:u8|subj
+              | body_len:u16be|body
+              | att_count:u8  [ name_len:u8|name | size:u32be | sha256(32) ]
 ```
 
 Every text field must be **printable ASCII** (`0x20..0x7e`), non-empty, and
-within bounds (from ≤ 128, to ≤ 128, subject ≤ 200, body ≤ 512; the body may
-also contain `\n`). Anything else is refused — which is also what makes header
-injection impossible. No trailing bytes are allowed.
+within bounds (from ≤ 128, to ≤ 128, subject ≤ 200, body ≤ 2048; the body may
+also contain `\n`). At most one attachment. Anything else is refused — which is
+also what makes header injection impossible. No trailing bytes are allowed.
 
 Response: `sig_len(1) || signature(64) || v(1)` — an ed25519 signature over
 `sha256(payload)`, i.e. over exactly the bytes the device displayed.

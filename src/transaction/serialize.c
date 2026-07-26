@@ -54,5 +54,26 @@ int transaction_serialize(const transaction_t *tx, uint8_t *out, size_t out_len)
     memmove(out + offset, tx->body, tx->body_len);
     offset += tx->body_len;
 
+    if (tx->has_attachment) {
+        if (offset + 1 + 1 + tx->att_name_len + 4 + ATT_HASH_LEN > out_len) {
+            return -1;
+        }
+        out[offset++] = 1;
+        out[offset++] = tx->att_name_len;
+        memmove(out + offset, tx->att_name, tx->att_name_len);
+        offset += tx->att_name_len;
+        out[offset++] = (uint8_t) (tx->att_size >> 24);
+        out[offset++] = (uint8_t) (tx->att_size >> 16);
+        out[offset++] = (uint8_t) (tx->att_size >> 8);
+        out[offset++] = (uint8_t) (tx->att_size);
+        memmove(out + offset, tx->att_hash, ATT_HASH_LEN);
+        offset += ATT_HASH_LEN;
+    } else {
+        if (offset + 1 > out_len) {
+            return -1;
+        }
+        out[offset++] = 0;
+    }
+
     return (int) offset;
 }

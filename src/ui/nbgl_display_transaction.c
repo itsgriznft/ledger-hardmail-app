@@ -31,9 +31,11 @@ static char g_to[MAX_TO_LEN + 1];
 static char g_subject[MAX_SUBJECT_LEN + 1];
 static char g_body[MAX_BODY_LEN + 1];
 static char g_request[2 * CHALLENGE_LEN + 1];
+static char g_attachment[MAX_ATT_NAME_LEN + 40];   // "name (12345 bytes)"
+static char g_att_hash[2 * ATT_HASH_LEN + 1];
 
-// From / To / Subject / Message / Request ID
-static nbgl_contentTagValue_t pairs[5];
+// From / To / Subject / Message / [Attachment / Attachment SHA-256 /] Request ID
+static nbgl_contentTagValue_t pairs[7];
 static nbgl_contentTagValueList_t pairList;
 
 // Copy a bounded, non-terminated field into a null-terminated display buffer.
@@ -73,19 +75,36 @@ int ui_display_transaction(void) {
         return io_send_sw(SWO_INCORRECT_DATA);
     }
 
-    pairs[0].item = "From";
-    pairs[0].value = g_from;
-    pairs[1].item = "To";
-    pairs[1].value = g_to;
-    pairs[2].item = "Subject";
-    pairs[2].value = g_subject;
-    pairs[3].item = "Message";
-    pairs[3].value = g_body;
-    pairs[4].item = "Request ID";
-    pairs[4].value = g_request;
+    int n = 0;
+    pairs[n].item = "From";
+    pairs[n++].value = g_from;
+    pairs[n].item = "To";
+    pairs[n++].value = g_to;
+    pairs[n].item = "Subject";
+    pairs[n++].value = g_subject;
+    pairs[n].item = "Message";
+    pairs[n++].value = g_body;
+
+    // An attachment cannot be read on this screen, but the human decides on its
+    // name and size, and the signature pins its exact content hash.
+    if (email->has_attachment) {
+        char name[MAX_ATT_NAME_LEN + 1];
+        copy_field(name, sizeof(name), email->att_name, email->att_name_len);
+        snprintf(g_attachment, sizeof(g_attachment), "%s (%u bytes)", name, (unsigned) email->att_size);
+        if (format_hex(email->att_hash, ATT_HASH_LEN, g_att_hash, sizeof(g_att_hash)) == -1) {
+            return io_send_sw(SWO_INCORRECT_DATA);
+        }
+        pairs[n].item = "Attachment";
+        pairs[n++].value = g_attachment;
+        pairs[n].item = "Attachment SHA-256";
+        pairs[n++].value = g_att_hash;
+    }
+
+    pairs[n].item = "Request ID";
+    pairs[n++].value = g_request;
 
     pairList.nbMaxLinesForValue = 0;  // no truncation: show the whole value
-    pairList.nbPairs = 5;
+    pairList.nbPairs = n;
     pairList.pairs = pairs;
     pairList.wrapping = true;
 
