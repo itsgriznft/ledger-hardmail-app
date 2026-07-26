@@ -18,7 +18,7 @@ class P1(IntEnum):
     # Parameter 1 for first APDU number.
     P1_START = 0x00
     # Parameter 1 for maximum APDU number.
-    P1_MAX = 0x03
+    P1_MAX = 0x10
     # Parameter 1 for screen confirmation for GET_PUBLIC_KEY.
     P1_CONFIRM = 0x01
 

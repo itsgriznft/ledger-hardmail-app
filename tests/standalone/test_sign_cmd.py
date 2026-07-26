@@ -1,3 +1,11 @@
+"""Functional tests for email clear-signing.
+
+The guarantee under test: the device shows the real message — From, To, Subject
+and the body in full — and its signature covers exactly those bytes. So the
+tests check both halves: what appears on screen (snapshot navigation) and that
+the returned ed25519 signature verifies over the payload that was displayed.
+"""
+
 import pytest
 from ragger.backend.interface import BackendInterface
 from ragger.error import ExceptionRAPDU
@@ -11,130 +19,164 @@ from application_client.boilerplate_response_unpacker import (
     unpack_get_public_key_response,
     unpack_sign_tx_response,
 )
-from application_client.boilerplate_transaction import Transaction
+from application_client.email_payload import (
+    Attachment,
+    MAX_BODY_LEN,
+    MAX_SUBJECT_LEN,
+    sample_email,
+)
 
 from .utils import check_signature_validity
 
-# In this tests we check the behavior of the device when asked to sign a transaction
+PATH = "m/44'/1'/0'/0/0"
 
 
-# In this test we send to the device a transaction to sign and validate it on screen
-# The transaction is short and will be sent in one chunk
-# We will ensure that the displayed information is correct by using screenshots comparison
-def test_sign_tx_short_tx(backend: BackendInterface, scenario_navigator: NavigateWithScenario) -> None:
-    # Use the app interface instead of raw interface
-    client = BoilerplateCommandSender(backend)
-    # The path used for this entire test
-    path: str = "m/44'/1'/0'/0/0"
-
-    # First we need to get the public key of the device in order to build the transaction
-    rapdu = client.get_public_key(path=path)
+def _device_key(client: BoilerplateCommandSender) -> bytes:
+    rapdu = client.get_public_key(path=PATH)
     _, public_key, _, _ = unpack_get_public_key_response(rapdu.data)
+    return public_key
 
-    # Create the transaction that will be sent to the device for signing
-    transaction = Transaction(
-        nonce=1,
-        to="0xde0b295669a9fd93d5f28d9ec85e40f4cb697bae",
-        value=666,
-        memo="For u EthDev",
-    ).serialize()
 
-    # Send the sign device instruction.
-    # As it requires on-screen validation, the function is asynchronous.
-    # It will yield the result when the navigation is done
-    with client.sign_tx(path=path, transaction=transaction):
-        # Validate the on-screen request by performing the navigation appropriate for this device
+def _signature(client: BoilerplateCommandSender) -> bytes:
+    _, signature, _ = unpack_sign_tx_response(client.get_async_response().data)
+    return signature
+
+
+# ── happy paths ─────────────────────────────────────────────────────────────
+
+
+def test_sign_email_short(backend: BackendInterface, scenario_navigator: NavigateWithScenario) -> None:
+    """A one-chunk message: approve it, and the signature must cover the payload."""
+    client = BoilerplateCommandSender(backend)
+    public_key = _device_key(client)
+    email = sample_email()
+
+    with client.sign_tx(path=PATH, transaction=email.serialize()):
         scenario_navigator.review_approve()
 
-    # The device as yielded the result, parse it and ensure that the signature is correct
-    response = client.get_async_response().data
-    _, der_sig, _ = unpack_sign_tx_response(response)
-    assert check_signature_validity(public_key, der_sig, transaction)
+    assert check_signature_validity(public_key, _signature(client), email.signed_digest())
 
 
-# In this test we send to the device a transaction to trig a blind-signing flow
-# The transaction is short and will be sent in one chunk
-# We will ensure that the displayed information is correct by using screenshots comparison
-def test_sign_tx_short_tx_blind_sign(backend: BackendInterface, scenario_navigator: NavigateWithScenario) -> None:
-    # Use the app interface instead of raw interface
+def test_sign_email_long_body(backend: BackendInterface, scenario_navigator: NavigateWithScenario) -> None:
+    """A message spanning several APDU chunks is still displayed and signed whole."""
     client = BoilerplateCommandSender(backend)
-    # The path used for this entire test
-    path: str = "m/44'/1'/0'/0/0"
+    public_key = _device_key(client)
+    email = sample_email(body="All of this text is shown on the device.\n" * 20)
 
-    # First we need to get the public key of the device in order to build the transaction
-    rapdu = client.get_public_key(path=path)
-    _, public_key, _, _ = unpack_get_public_key_response(rapdu.data)
-
-    # Create the transaction that will be sent to the device for signing
-    transaction = Transaction(
-        nonce=1,
-        to="0x0000000000000000000000000000000000000000",
-        value=0,
-        memo="Blind-sign",
-    ).serialize()
-
-    # As it requires on-screen validation, the function is asynchronous.
-    # It will yield the result when the navigation is done
-    with client.sign_tx(path=path, transaction=transaction):
-        # Validate the on-screen request by performing the navigation appropriate for this device
-        scenario_navigator.review_approve_with_warning(warning_path="part1")
-
-    # The device as yielded the result, parse it and ensure that the signature is correct
-    response = client.get_async_response().data
-    _, der_sig, _ = unpack_sign_tx_response(response)
-    assert check_signature_validity(public_key, der_sig, transaction)
-
-
-# In this test se send to the device a transaction to sign and validate it on screen
-# This test is mostly the same as the previous one but with different values.
-# In particular the long memo will force the transaction to be sent in multiple chunks
-def test_sign_tx_long_tx(backend: BackendInterface, scenario_navigator: NavigateWithScenario) -> None:
-    # Use the app interface instead of raw interface
-    client = BoilerplateCommandSender(backend)
-    path: str = "m/44'/1'/0'/0/0"
-
-    rapdu = client.get_public_key(path=path)
-    _, public_key, _, _ = unpack_get_public_key_response(rapdu.data)
-
-    transaction = Transaction(
-        nonce=1,
-        to="0xde0b295669a9fd93d5f28d9ec85e40f4cb697bae",
-        value=666,
-        memo=(
-            "This is a very long memo. "
-            "It will force the app client to send the serialized transaction to be sent in chunk. "
-            "As the maximum chunk size is 255 bytes we will make this memo greater than 255 characters. "
-            "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed non risus. Suspendisse lectus tortor, "
-            "dignissim sit amet, adipiscing nec, ultricies sed, dolor. Cras elementum ultrices diam."
-        ),
-    ).serialize()
-
-    with client.sign_tx(path=path, transaction=transaction):
+    with client.sign_tx(path=PATH, transaction=email.serialize()):
         scenario_navigator.review_approve()
 
-    response = client.get_async_response().data
-    _, der_sig, _ = unpack_sign_tx_response(response)
-    assert check_signature_validity(public_key, der_sig, transaction)
+    assert check_signature_validity(public_key, _signature(client), email.signed_digest())
 
 
-# Transaction signature refused test
-# The test will ask for a transaction signature that will be refused on screen
-def test_sign_tx_refused(backend: BackendInterface, scenario_navigator: NavigateWithScenario) -> None:
-    # Use the app interface instead of raw interface
+def test_sign_email_with_attachment(backend: BackendInterface, scenario_navigator: NavigateWithScenario) -> None:
+    """An attachment is bound by name, size and content hash — all shown on screen."""
     client = BoilerplateCommandSender(backend)
-    path: str = "m/44'/1'/0'/0/0"
+    public_key = _device_key(client)
+    email = sample_email(attachment=Attachment.of("q3-summary.txt", b"revenue: 4.2M\n"))
 
-    transaction = Transaction(
-        nonce=1,
-        to="0xde0b295669a9fd93d5f28d9ec85e40f4cb697bae",
-        value=666,
-        memo="This transaction will be refused by the user",
-    ).serialize()
+    with client.sign_tx(path=PATH, transaction=email.serialize()):
+        scenario_navigator.review_approve()
+
+    assert check_signature_validity(public_key, _signature(client), email.signed_digest())
+
+
+def test_signature_does_not_cover_a_different_email(
+    backend: BackendInterface, scenario_navigator: NavigateWithScenario
+) -> None:
+    """The whole point of clear signing: change one field, the signature stops verifying."""
+    client = BoilerplateCommandSender(backend)
+    public_key = _device_key(client)
+    email = sample_email()
+
+    with client.sign_tx(path=PATH, transaction=email.serialize()):
+        scenario_navigator.review_approve()
+    signature = _signature(client)
+
+    tampered = sample_email(subject="URGENT: wire transfer")
+    assert not check_signature_validity(public_key, signature, tampered.signed_digest())
+
+
+def test_sign_subject_at_max_length(backend: BackendInterface, scenario_navigator: NavigateWithScenario) -> None:
+    """Boundary case: exactly at the limit must still be accepted."""
+    client = BoilerplateCommandSender(backend)
+    public_key = _device_key(client)
+    email = sample_email(subject="s" * MAX_SUBJECT_LEN)
+
+    with client.sign_tx(path=PATH, transaction=email.serialize()):
+        scenario_navigator.review_approve()
+
+    assert check_signature_validity(public_key, _signature(client), email.signed_digest())
+
+
+# ── user rejection ──────────────────────────────────────────────────────────
+
+
+def test_sign_email_refused(backend: BackendInterface, scenario_navigator: NavigateWithScenario) -> None:
+    """Rejecting on the device produces a denial, never a signature."""
+    client = BoilerplateCommandSender(backend)
+    email = sample_email()
 
     with pytest.raises(ExceptionRAPDU) as e:
-        with client.sign_tx(path=path, transaction=transaction):
+        with client.sign_tx(path=PATH, transaction=email.serialize()):
             scenario_navigator.review_reject()
 
-    # Assert that we have received a refusal
     assert e.value.status == Errors.SWO_CONDITIONS_NOT_SATISFIED
     assert len(e.value.data) == 0
+
+
+# ── malformed input: the device must fail closed ────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        # A zero-length sender is not a message, it is a malformed buffer.
+        pytest.param(lambda p: p[:16] + bytes([0]), id="empty_from"),
+        # Trailing bytes mean host and device disagree about what is being signed.
+        pytest.param(lambda p: p + b"\x41", id="trailing_bytes"),
+        # Truncated payload: a field never arrives.
+        pytest.param(lambda p: p[:-4], id="truncated"),
+        # More than one attachment is unsupported — and must not be silently ignored.
+        pytest.param(lambda p: p[:-1] + bytes([2]), id="two_attachments"),
+    ],
+)
+def test_sign_malformed_payload_is_refused(backend: BackendInterface, mutator) -> None:
+    """Malformed payloads are rejected outright — no prompt, no signature."""
+    client = BoilerplateCommandSender(backend)
+    payload = mutator(sample_email().serialize())
+
+    with pytest.raises(ExceptionRAPDU) as e:
+        with client.sign_tx(path=PATH, transaction=payload):
+            pass
+
+    assert e.value.status == Errors.SWO_INCORRECT_DATA
+
+
+def test_sign_body_too_long_is_refused(backend: BackendInterface) -> None:
+    """A body the device cannot display in full is refused, never truncated."""
+    client = BoilerplateCommandSender(backend)
+    # Built by hand: a well-behaved client would refuse to compose this at all,
+    # so we bypass it to check the DEVICE fails closed on its own.
+    oversized = MAX_BODY_LEN + 1
+    payload = sample_email().serialize()
+    head = payload[: 16 + 1 + 20 + 1 + 16 + 1 + 29]  # challenge + from + to + subject
+    payload = head + oversized.to_bytes(2, "big") + b"a" * oversized + bytes([0])
+
+    with pytest.raises(ExceptionRAPDU) as e:
+        with client.sign_tx(path=PATH, transaction=payload):
+            pass
+
+    assert e.value.status == Errors.SWO_INCORRECT_DATA
+
+
+def test_sign_control_character_in_subject_is_refused(backend: BackendInterface) -> None:
+    """Control characters could smuggle mail headers — the device refuses them."""
+    client = BoilerplateCommandSender(backend)
+    email = sample_email(subject="innocent\nBcc: attacker@evil.com")
+
+    with pytest.raises(ExceptionRAPDU) as e:
+        with client.sign_tx(path=PATH, transaction=email.serialize()):
+            pass
+
+    assert e.value.status == Errors.SWO_INCORRECT_DATA

@@ -1,7 +1,7 @@
 [app]
 build_directory = "./"
 sdk = "C"
-devices = ["nanox", "nanos+", "stax", "flex", "apex_p"]
+devices = ["stax", "flex", "apex_p"]
 
 # use_cases are named sets of compilation flags that Ledger tools can branch on to ease developer experience
 # - The application makefile allows `make <use_case_name>`

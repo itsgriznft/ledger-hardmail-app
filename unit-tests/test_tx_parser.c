@@ -11,142 +11,274 @@
 #include "transaction/deserialize.h"
 #include "types.h"
 
-static void test_tx_serialization(void **state) {
-    (void) state;
+// Helpers to build an email payload the way the host does:
+//   challenge(16) | from | to | subject | body_len:u16be|body
+//                 | att_count:u8 [ name | size:u32be | sha256(32) ]
+typedef struct {
+    uint8_t buf[MAX_TX_LEN + 64];
+    size_t len;
+} builder_t;
 
-    transaction_t tx;
-    // clang-format off
-    uint8_t raw_tx[] = {
-        // nonce (8)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-        // to (20)
-        0x7a, 0xc3, 0x39, 0x97, 0x54, 0x4e, 0x31, 0x75,
-        0xd2, 0x66, 0xbd, 0x02, 0x24, 0x39, 0xb2, 0x2c,
-        0xdb, 0x16, 0x50, 0x8c,
-        // value (8)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x08, 0x07,
-        // memo length (varint: 1-9)
-        0xf1,
-        // memo (var: 241)
-        0x54, 0x68, 0x65, 0x20, 0x54, 0x68, 0x65, 0x6f,
-        0x72, 0x79, 0x20, 0x6f, 0x66, 0x20, 0x47, 0x72,
-        0x6f, 0x75, 0x70, 0x73, 0x20, 0x69, 0x73, 0x20,
-        0x61, 0x20, 0x62, 0x72, 0x61, 0x6e, 0x63, 0x68,
-        0x20, 0x6f, 0x66, 0x20, 0x6d, 0x61, 0x74, 0x68,
-        0x65, 0x6d, 0x61, 0x74, 0x69, 0x63, 0x73, 0x20,
-        0x69, 0x6e, 0x20, 0x77, 0x68, 0x69, 0x63, 0x68,
-        0x20, 0x6f, 0x6e, 0x65, 0x20, 0x64, 0x6f, 0x65,
-        0x73, 0x20, 0x73, 0x6f, 0x6d, 0x65, 0x74, 0x68,
-        0x69, 0x6e, 0x67, 0x20, 0x74, 0x6f, 0x20, 0x73,
-        0x6f, 0x6d, 0x65, 0x74, 0x68, 0x69, 0x6e, 0x67,
-        0x20, 0x61, 0x6e, 0x64, 0x20, 0x74, 0x68, 0x65,
-        0x6e, 0x20, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x72,
-        0x65, 0x73, 0x20, 0x74, 0x68, 0x65, 0x20, 0x72,
-        0x65, 0x73, 0x75, 0x6c, 0x74, 0x20, 0x77, 0x69,
-        0x74, 0x68, 0x20, 0x74, 0x68, 0x65, 0x20, 0x72,
-        0x65, 0x73, 0x75, 0x6c, 0x74, 0x20, 0x6f, 0x62,
-        0x74, 0x61, 0x69, 0x6e, 0x65, 0x64, 0x20, 0x66,
-        0x72, 0x6f, 0x6d, 0x20, 0x64, 0x6f, 0x69, 0x6e,
-        0x67, 0x20, 0x74, 0x68, 0x65, 0x20, 0x73, 0x61,
-        0x6d, 0x65, 0x20, 0x74, 0x68, 0x69, 0x6e, 0x67,
-        0x20, 0x74, 0x6f, 0x20, 0x73, 0x6f, 0x6d, 0x65,
-        0x74, 0x68, 0x69, 0x6e, 0x67, 0x20, 0x65, 0x6c,
-        0x73, 0x65, 0x2c, 0x20, 0x6f, 0x72, 0x20, 0x73,
-        0x6f, 0x6d, 0x65, 0x74, 0x68, 0x69, 0x6e, 0x67,
-        0x20, 0x65, 0x6c, 0x73, 0x65, 0x20, 0x74, 0x6f,
-        0x20, 0x74, 0x68, 0x65, 0x20, 0x73, 0x61, 0x6d,
-        0x65, 0x20, 0x74, 0x68, 0x69, 0x6e, 0x67, 0x2e,
-        0x20, 0x4e, 0x65, 0x77, 0x6d, 0x61, 0x6e, 0x2c,
-        0x20, 0x4a, 0x61, 0x6d, 0x65, 0x73, 0x20, 0x52,
-        0x2e
-    };
-
-    buffer_t buf = {.ptr = raw_tx, .size = sizeof(raw_tx), .offset = 0};
-
-    parser_status_e status = transaction_deserialize(&buf, &tx, false);
-
-    assert_int_equal(status, PARSING_OK);
-
-    uint8_t output[300];
-    int length = transaction_serialize(&tx, output, sizeof(output));
-    assert_int_equal(length, sizeof(raw_tx));
-    assert_memory_equal(raw_tx, output, sizeof(raw_tx));
+static void put(builder_t *b, const void *src, size_t n) {
+    memcpy(b->buf + b->len, src, n);
+    b->len += n;
+}
+static void put_u8(builder_t *b, uint8_t v) {
+    b->buf[b->len++] = v;
+}
+static void put_text(builder_t *b, const char *s) {
+    size_t n = strlen(s);
+    put_u8(b, (uint8_t) n);
+    put(b, s, n);
+}
+static void put_body(builder_t *b, const char *s, size_t n) {
+    put_u8(b, (uint8_t) (n >> 8));
+    put_u8(b, (uint8_t) (n & 0xff));
+    put(b, s, n);
 }
 
-static void test_token_tx_serialization(void **state) {
-    (void) state;
+static const uint8_t CHALLENGE[CHALLENGE_LEN] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                                                 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00};
+static const uint8_t ATT_HASH[ATT_HASH_LEN] = {
+    0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0,    0,    0,    0,    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
-    transaction_t tx;
-    // clang-format off
-    uint8_t raw_token_tx[] = {
-        // nonce (8)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
-        // to (20)
-        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22,
-        0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00,
-        0x12, 0x34, 0x56, 0x78,
-        // token_address (32)
-        0xca, 0xfe, 0xba, 0xbe, 0xde, 0xad, 0xbe, 0xef,
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-        // value (8)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xe8,
-        // memo length (varint: 1)
-        0x0c,
-        // memo (12 bytes)
-        0x54, 0x6f, 0x6b, 0x65, 0x6e, 0x20, 0x74, 0x72,
-        0x61, 0x6e, 0x73, 0x66
-    };
-    // clang-format on
-
-    buffer_t buf = {.ptr = raw_token_tx, .size = sizeof(raw_token_tx), .offset = 0};
-
-    parser_status_e status = transaction_deserialize(&buf, &tx, true);
-
-    assert_int_equal(status, PARSING_OK);
-    assert_int_equal(tx.nonce, 2);
-    assert_int_equal(tx.value, 1000);
-    assert_int_equal(tx.memo_len, 12);
-    assert_non_null(tx.token_address);
-
-    // Verify token address was parsed correctly
-    uint8_t expected_token_addr[] = {0xca, 0xfe, 0xba, 0xbe, 0xde, 0xad, 0xbe, 0xef,
-                                     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-                                     0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-                                     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
-    assert_memory_equal(tx.token_address, expected_token_addr, 32);
+// A well-formed message with no attachment.
+static void build_valid(builder_t *b) {
+    b->len = 0;
+    put(b, CHALLENGE, CHALLENGE_LEN);
+    put_text(b, "agent@hardmail.local");
+    put_text(b, "boss@example.com");
+    put_text(b, "Q3 report");
+    put_body(b, "Hi,\nnumbers attached.\n", 22);
+    put_u8(b, 0);  // no attachment
 }
 
-static void test_token_tx_error_short_buffer(void **state) {
+static parser_status_e parse(builder_t *b, transaction_t *tx) {
+    buffer_t buf = {.ptr = b->buf, .size = b->len, .offset = 0};
+    return transaction_deserialize(&buf, tx, false);
+}
+
+// ── happy paths ─────────────────────────────────────────────────────────────
+
+static void test_parse_valid(void **state) {
     (void) state;
-
+    builder_t b;
     transaction_t tx;
-    // clang-format off
-    uint8_t raw_token_tx[] = {
-        // nonce (8)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
-        // to (20)
-        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22,
-        0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00,
-        0x12, 0x34, 0x56, 0x78,
-        // token_address (only 10 bytes instead of 32 - truncated)
-        0xca, 0xfe, 0xba, 0xbe, 0xde, 0xad, 0xbe, 0xef,
-        0x00, 0x11
-    };
-    // clang-format on
+    build_valid(&b);
 
-    buffer_t buf = {.ptr = raw_token_tx, .size = sizeof(raw_token_tx), .offset = 0};
+    assert_int_equal(parse(&b, &tx), PARSING_OK);
+    assert_memory_equal(tx.challenge, CHALLENGE, CHALLENGE_LEN);
+    assert_int_equal(tx.from_len, 20);
+    assert_memory_equal(tx.from, "agent@hardmail.local", 20);
+    assert_int_equal(tx.to_len, 16);
+    assert_memory_equal(tx.to, "boss@example.com", 16);
+    assert_int_equal(tx.subject_len, 9);
+    assert_memory_equal(tx.subject, "Q3 report", 9);
+    assert_int_equal(tx.body_len, 22);
+    assert_memory_equal(tx.body, "Hi,\nnumbers attached.\n", 22);
+    assert_int_equal(tx.has_attachment, 0);
+}
 
-    parser_status_e status = transaction_deserialize(&buf, &tx, true);
+static void test_parse_with_attachment(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    build_valid(&b);
+    b.len--;  // drop the "no attachment" marker
+    put_u8(&b, 1);
+    put_text(&b, "q3-summary.txt");
+    put_u8(&b, 0);
+    put_u8(&b, 0);
+    put_u8(&b, 0x01);
+    put_u8(&b, 0x2c);  // size = 300
+    put(&b, ATT_HASH, ATT_HASH_LEN);
 
-    assert_int_equal(status, TOKEN_ADDRESS_PARSING_ERROR);
+    assert_int_equal(parse(&b, &tx), PARSING_OK);
+    assert_int_equal(tx.has_attachment, 1);
+    assert_int_equal(tx.att_name_len, 14);
+    assert_memory_equal(tx.att_name, "q3-summary.txt", 14);
+    assert_int_equal(tx.att_size, 300);
+    assert_memory_equal(tx.att_hash, ATT_HASH, ATT_HASH_LEN);
+}
+
+// Serializing a parsed message must reproduce the original bytes exactly —
+// otherwise host and device would disagree about what was signed.
+static void test_round_trip(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    uint8_t out[MAX_TX_LEN];
+    build_valid(&b);
+    assert_int_equal(parse(&b, &tx), PARSING_OK);
+
+    int n = transaction_serialize(&tx, out, sizeof(out));
+    assert_int_equal(n, (int) b.len);
+    assert_memory_equal(out, b.buf, b.len);
+}
+
+static void test_body_max_length_accepted(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    char big[MAX_BODY_LEN];
+    memset(big, 'a', sizeof(big));
+
+    b.len = 0;
+    put(&b, CHALLENGE, CHALLENGE_LEN);
+    put_text(&b, "a@b.co");
+    put_text(&b, "c@d.co");
+    put_text(&b, "s");
+    put_body(&b, big, MAX_BODY_LEN);
+    put_u8(&b, 0);
+
+    assert_int_equal(parse(&b, &tx), PARSING_OK);
+    assert_int_equal(tx.body_len, MAX_BODY_LEN);
+}
+
+// ── fail-closed paths ───────────────────────────────────────────────────────
+// Security overrides availability: anything malformed must be REFUSED, never
+// coerced, truncated or silently accepted.
+
+static void test_reject_empty_from(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    b.len = 0;
+    put(&b, CHALLENGE, CHALLENGE_LEN);
+    put_u8(&b, 0);  // zero-length from
+    assert_int_equal(parse(&b, &tx), FROM_PARSING_ERROR);
+}
+
+static void test_reject_control_char_in_subject(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    b.len = 0;
+    put(&b, CHALLENGE, CHALLENGE_LEN);
+    put_text(&b, "a@b.co");
+    put_text(&b, "c@d.co");
+    put_text(&b, "bad\nsubject");  // newline is a control char outside the body
+    put_body(&b, "x", 1);
+    put_u8(&b, 0);
+    assert_int_equal(parse(&b, &tx), SUBJECT_PARSING_ERROR);
+}
+
+// A CR in the body could confuse downstream mail handling — only \n is allowed.
+static void test_reject_cr_in_body(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    b.len = 0;
+    put(&b, CHALLENGE, CHALLENGE_LEN);
+    put_text(&b, "a@b.co");
+    put_text(&b, "c@d.co");
+    put_text(&b, "s");
+    put_body(&b, "line\r\nline", 10);
+    put_u8(&b, 0);
+    assert_int_equal(parse(&b, &tx), FIELD_ENCODING_ERROR);
+}
+
+static void test_reject_empty_body(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    b.len = 0;
+    put(&b, CHALLENGE, CHALLENGE_LEN);
+    put_text(&b, "a@b.co");
+    put_text(&b, "c@d.co");
+    put_text(&b, "s");
+    put_body(&b, "", 0);
+    put_u8(&b, 0);
+    assert_int_equal(parse(&b, &tx), BODY_PARSING_ERROR);
+}
+
+// The device must never sign a message longer than it can display.
+static void test_reject_oversized_body(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    b.len = 0;
+    put(&b, CHALLENGE, CHALLENGE_LEN);
+    put_text(&b, "a@b.co");
+    put_text(&b, "c@d.co");
+    put_text(&b, "s");
+    // claim one byte more than the device can render
+    put_u8(&b, (uint8_t) ((MAX_BODY_LEN + 1) >> 8));
+    put_u8(&b, (uint8_t) ((MAX_BODY_LEN + 1) & 0xff));
+    assert_int_equal(parse(&b, &tx), BODY_PARSING_ERROR);
+}
+
+static void test_reject_truncated_challenge(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    b.len = 0;
+    put(&b, CHALLENGE, CHALLENGE_LEN - 1);  // one byte short
+    assert_int_equal(parse(&b, &tx), CHALLENGE_PARSING_ERROR);
+}
+
+static void test_reject_trailing_bytes(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    build_valid(&b);
+    put_u8(&b, 0x41);  // one byte too many
+    assert_int_equal(parse(&b, &tx), WRONG_LENGTH_ERROR);
+}
+
+static void test_reject_multiple_attachments(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    build_valid(&b);
+    b.len--;
+    put_u8(&b, 2);  // more than one attachment
+    assert_int_equal(parse(&b, &tx), ATTACHMENT_PARSING_ERROR);
+}
+
+static void test_reject_truncated_attachment_hash(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    build_valid(&b);
+    b.len--;
+    put_u8(&b, 1);
+    put_text(&b, "f.txt");
+    put_u8(&b, 0);
+    put_u8(&b, 0);
+    put_u8(&b, 0);
+    put_u8(&b, 10);
+    put(&b, ATT_HASH, ATT_HASH_LEN - 1);  // hash cut short
+    assert_int_equal(parse(&b, &tx), ATTACHMENT_PARSING_ERROR);
+}
+
+static void test_reject_payload_over_max(void **state) {
+    (void) state;
+    builder_t b;
+    transaction_t tx;
+    build_valid(&b);
+    buffer_t buf = {.ptr = b.buf, .size = MAX_TX_LEN + 1, .offset = 0};
+    assert_int_equal(transaction_deserialize(&buf, &tx, false), WRONG_LENGTH_ERROR);
 }
 
 int main() {
-    const struct CMUnitTest tests[] = {cmocka_unit_test(test_tx_serialization),
-                                       cmocka_unit_test(test_token_tx_serialization),
-                                       cmocka_unit_test(test_token_tx_error_short_buffer)};
+    const struct CMUnitTest tests[] = {
+        cmocka_unit_test(test_parse_valid),
+        cmocka_unit_test(test_parse_with_attachment),
+        cmocka_unit_test(test_round_trip),
+        cmocka_unit_test(test_body_max_length_accepted),
+        cmocka_unit_test(test_reject_empty_from),
+        cmocka_unit_test(test_reject_control_char_in_subject),
+        cmocka_unit_test(test_reject_cr_in_body),
+        cmocka_unit_test(test_reject_empty_body),
+        cmocka_unit_test(test_reject_oversized_body),
+        cmocka_unit_test(test_reject_truncated_challenge),
+        cmocka_unit_test(test_reject_trailing_bytes),
+        cmocka_unit_test(test_reject_multiple_attachments),
+        cmocka_unit_test(test_reject_truncated_attachment_hash),
+        cmocka_unit_test(test_reject_payload_over_max),
+    };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

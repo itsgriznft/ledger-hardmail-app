@@ -78,7 +78,11 @@ docker run --rm -e BOLOS_SDK=/opt/stax-secure-sdk -v "$(pwd)":/app \
 # -> bin/app.elf
 ```
 
-Other targets: `$NANOX_SDK`, `$NANOSP_SDK`, `$FLEX_SDK`, `$APEX_P_SDK`.
+Other targets: `$FLEX_SDK`, `$APEX_P_SDK`.
+
+**Touchscreen devices only** (Stax, Flex, Apex). Clear-signing an email means
+rendering the whole message, and a 128x64 Nano screen cannot do that honestly —
+so rather than fall back to a hash there, the app simply does not target Nano.
 
 ## Run in the emulator
 
@@ -109,7 +113,22 @@ seed** — never send real value to keys derived from it.
 
 ## Status
 
-Proof of concept. Not audited, not a production Ledger app, not submitted to
-Ledger's app store. The upstream boilerplate's own tests/CI still reference the
-original example transaction format and have not been ported to the email
-payload.
+Proof of concept: not audited, and not submitted to Ledger's app store.
+
+It does follow the shape Ledger asks of an app, though — see
+[ledger-app-ai-instructions](https://github.com/LedgerHQ/ledger-app-ai-instructions):
+
+```
+unit tests    14 parser cases (happy paths + every fail-closed path)   PASS
+functional    24 Ragger tests x stax / flex / apex_p, golden snapshots PASS
+```
+
+```bash
+# unit tests
+docker run --rm -v "$(pwd)":/app <builder-image>   bash -c 'cd /app/unit-tests && cmake -Bbuild -H. && make -C build && cd build && ctest'
+
+# functional tests on every device in ledger_app.toml
+pip install "ragger[speculos]"
+./tests/run_all_devices.sh              # verify against committed snapshots
+./tests/run_all_devices.sh --golden     # regenerate them
+```

@@ -1,21 +1,39 @@
 import re
 from pathlib import Path
 
-from Crypto.Hash import keccak
-from ecdsa.curves import SECP256k1
-from ecdsa.keys import VerifyingKey
-from ecdsa.util import sigdecode_der
+from Crypto.Signature import eddsa
 
 
-# Check if a signature of a given message is valid
-def check_signature_validity(public_key: bytes, signature: bytes, message: bytes) -> bool:
-    pk: VerifyingKey = VerifyingKey.from_string(public_key, curve=SECP256k1, hashfunc=None)
-    # Compute message hash (keccak_256)
-    k = keccak.new(digest_bits=256)
-    k.update(message)
-    message_hash = k.digest()
+def compressed_public_key(raw_public_key: bytes) -> bytes:
+    """The 32-byte ed25519 key inside the SDK's raw public-key buffer."""
+    return raw_public_key[1:33]
 
-    return pk.verify_digest(signature=signature, digest=message_hash, sigdecode=sigdecode_der)
+
+def is_valid_ed25519_key(compressed_key: bytes) -> bool:
+    """True iff these 32 bytes decode as a point on Ed25519."""
+    if len(compressed_key) != 32:
+        return False
+    try:
+        eddsa.import_public_key(compressed_key)
+        return True
+    except ValueError:
+        return False
+
+
+def check_signature_validity(raw_public_key: bytes, signature: bytes, digest: bytes) -> bool:
+    """True iff `signature` is the device's ed25519 signature over `digest`.
+
+    The device signs sha256(payload) — the payload being exactly the bytes it
+    rendered — so verifying here proves the signature covers what was displayed.
+    """
+    if len(signature) != 64:
+        return False
+    verifier = eddsa.new(eddsa.import_public_key(compressed_public_key(raw_public_key)), "rfc8032")
+    try:
+        verifier.verify(digest, signature)
+        return True
+    except ValueError:
+        return False
 
 
 def verify_name(name: str) -> None:
