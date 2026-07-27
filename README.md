@@ -17,19 +17,14 @@ Companion host software (agent + verifying relay):
 
 ## What the user sees (Stax)
 
-```
-1 of 4   Review email to send                    [Reject]
-2 of 4   From        HardMail Agent <agent@hardmail.local>
-         To          boss@example.com
-         Subject     Q3 report is ready for review
-3 of 5   Message     Hi,
-                     The Q3 report is finalized. Approved on hardware.
-                     -- HardMail
-         Attachment  q3-summary.txt (42 bytes)
-4 of 5   Attachment SHA-256  FF5FB4EC753CE6465AA5CAE2060D16A8…
-         Request ID          5289F578C2617F4B4B2FA623CD587B0B
-5 of 5   Sign to send this email?      [ Hold to sign ]
-```
+<p align="center">
+  <img src="docs/screens/1-header.png" width="240" alt="From, To, Subject and the request id on the device screen">
+  <img src="docs/screens/2-message.png" width="240" alt="The message body rendered on the device screen">
+  <img src="docs/screens/3-sign.png" width="240" alt="Sign to send this email? Hold to sign">
+</p>
+
+Real screenshots from Speculos, not mockups. The middle one is the point: the
+device is rendering the message itself, so what you approve is what gets sent.
 
 An attachment cannot be *read* on a device screen — no hardware wallet renders a
 PDF. What the device does is **bind** it: the human decides on the file's name
